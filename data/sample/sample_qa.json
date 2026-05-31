@@ -1,0 +1,22 @@
+[
+  {
+    "question": "What is the main topic discussed in the document?",
+    "ground_truth": "The main topic should be identified from the document content."
+  },
+  {
+    "question": "What are the key findings or conclusions presented?",
+    "ground_truth": "Key findings should be summarized from the document."
+  },
+  {
+    "question": "Who are the authors or contributors mentioned?",
+    "ground_truth": "Author information should be extracted from the document metadata."
+  },
+  {
+    "question": "What methodology or approach is described?",
+    "ground_truth": "The methodology should be described based on document content."
+  },
+  {
+    "question": "What recommendations or future work are suggested?",
+    "ground_truth": "Recommendations should be identified from the concluding sections."
+  }
+]
