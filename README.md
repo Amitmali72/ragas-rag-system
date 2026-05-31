@@ -305,12 +305,6 @@ All parameters are configurable in `config/settings.py`:
 
 ---
 
-## 📝 Resume-Ready Description
-
-> **Built Knowledge Copilot**, a production-grade Hybrid RAG system using LangChain, FAISS, and BM25 with Reciprocal Rank Fusion for document intelligence. Implemented semantic + keyword hybrid retrieval to reduce LLM hallucinations with citation-grounded answers. Features include multi-format document processing (PDF/DOCX/TXT), citation-aware responses, RAGAS evaluation dashboard, and LLM vs RAG benchmarking. **Tech stack:** Python, LangChain, FAISS, BM25, Sentence Transformers, Groq API, Streamlit, RAGAS, Plotly.
-
----
-
 ## 📄 License
 
 This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
