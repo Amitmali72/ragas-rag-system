@@ -75,3 +75,31 @@ def create_chunks(
             global_chunk_index += 1
 
     return all_chunks
+
+
+def chunk_text(
+    text: str,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
+    source: str = "unknown",
+    page_number: int = 1,
+) -> List[Document]:
+    """Helper to split a raw text string into Document chunks.
+
+    Args:
+        text: Raw text to split.
+        chunk_size: Maximum characters per chunk.
+        chunk_overlap: Overlapping characters between consecutive chunks.
+        source: Source identifier / file name.
+        page_number: Page number for attribution.
+
+    Returns:
+        List of LangChain Document objects with chunk metadata.
+    """
+    if not text or not text.strip():
+        return []
+    return create_chunks(
+        [{"text": text, "source": source, "page_number": page_number}],
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )

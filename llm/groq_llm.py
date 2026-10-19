@@ -39,8 +39,10 @@ def get_groq_llm(
             "variable or pass it explicitly."
         )
 
+    resolved_model: str = model_name.strip() if (model_name and model_name.strip()) else DEFAULT_GROQ_MODEL
+
     llm = ChatGroq(
-        model_name=model_name,
+        model_name=resolved_model,
         api_key=resolved_key,
         temperature=0,
     )

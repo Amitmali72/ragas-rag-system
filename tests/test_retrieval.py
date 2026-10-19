@@ -362,3 +362,77 @@ class TestSemanticRetrieval:
 
         results = mock_faiss.similarity_search_with_score("anything", k=5)
         assert results == []
+
+
+# ===================================================================
+# Tests: Real Retriever Classes (SemanticRetriever, KeywordRetriever, HybridRetriever)
+# ===================================================================
+
+class TestRealRetrieverModules:
+    """Tests directly exercising production retriever classes."""
+
+    def test_semantic_retriever_class(self, sample_documents: List[Document]) -> None:
+        """SemanticRetriever should format results with normalized scores."""
+        from retrieval.semantic_retriever import SemanticRetriever
+
+        mock_faiss = MagicMock()
+        mock_faiss.similarity_search_with_score.return_value = [
+            (sample_documents[0], 0.25),
+            (sample_documents[1], 1.0),
+        ]
+
+        retriever = SemanticRetriever(mock_faiss)
+        results = retriever.retrieve("test query", top_k=2)
+
+        assert len(results) == 2
+        assert results[0]["retriever"] == "semantic"
+        assert results[0]["rank"] == 1
+        assert abs(results[0]["score"] - (1.0 / (1.0 + 0.25))) < 1e-5
+        assert results[1]["rank"] == 2
+        assert abs(results[1]["score"] - 0.5) < 1e-5
+
+    def test_keyword_retriever_class(self, sample_documents: List[Document]) -> None:
+        """KeywordRetriever should index documents and return ranked results."""
+        from retrieval.keyword_retriever import KeywordRetriever
+
+        retriever = KeywordRetriever(sample_documents)
+        results = retriever.retrieve("machine learning", top_k=2)
+
+        assert len(results) > 0
+        assert results[0]["retriever"] == "keyword"
+        assert results[0]["rank"] == 1
+        assert "machine learning" in results[0]["document"].page_content.lower()
+
+    def test_hybrid_retriever_class(self, sample_documents: List[Document]) -> None:
+        """HybridRetriever should fuse semantic and keyword search via RRF."""
+        from retrieval.semantic_retriever import SemanticRetriever
+        from retrieval.keyword_retriever import KeywordRetriever
+        from retrieval.hybrid_retriever import HybridRetriever
+
+        mock_faiss = MagicMock()
+        mock_faiss.similarity_search_with_score.return_value = [
+            (sample_documents[0], 0.1),
+            (sample_documents[1], 0.5),
+        ]
+        semantic_ret = SemanticRetriever(mock_faiss)
+        keyword_ret = KeywordRetriever(sample_documents)
+
+        hybrid = HybridRetriever(
+            semantic_retriever=semantic_ret,
+            keyword_retriever=keyword_ret,
+        )
+
+        fused_results, metrics = hybrid.retrieve(
+            query="neural networks",
+            top_k_semantic=2,
+            top_k_bm25=2,
+            top_k_final=2,
+        )
+
+        assert len(fused_results) <= 2
+        assert "retrieval_time_ms" in metrics
+        assert metrics["num_fused"] == len(fused_results)
+        for res in fused_results:
+            assert "document" in res
+            assert "score" in res
+            assert "retrievers" in res

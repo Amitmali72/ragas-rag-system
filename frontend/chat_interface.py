@@ -11,7 +11,10 @@ import streamlit as st
 from typing import Dict, List, Any, Optional
 
 # --- Backend imports ---
+from retrieval.semantic_retriever import SemanticRetriever
 from retrieval.hybrid_retriever import HybridRetriever
+from retrieval.pageindex_retriever import PageIndexRetriever
+from workflow.graph import run_adaptive_rag
 from llm.groq_llm import get_groq_llm, generate_answer
 from utils.citation_formatter import (
     format_citations,
@@ -195,9 +198,13 @@ def _render_chunks(chunks: List[Dict]) -> None:
 def _render_metrics_pills(metrics: Dict[str, Any]) -> None:
     """Display tiny metric pills below an assistant message."""
     pills: List[str] = []
-    if "retrieval_time_ms" in metrics:
+    if "strategy" in metrics:
+        pills.append(f"🎯 Strategy: {str(metrics['strategy']).upper()}")
+    if metrics.get("retries", 0) > 0:
+        pills.append(f"🔄 Retries: {metrics['retries']}")
+    if "retrieval_time_ms" in metrics and metrics["retrieval_time_ms"] > 0:
         pills.append(f"🔍 Retrieval: {format_time(metrics['retrieval_time_ms'])}")
-    if "generation_time_ms" in metrics:
+    if "generation_time_ms" in metrics and metrics["generation_time_ms"] > 0:
         pills.append(f"⚡ Generation: {format_time(metrics['generation_time_ms'])}")
     if "total_time_ms" in metrics:
         pills.append(f"⏱️ Total: {format_time(metrics['total_time_ms'])}")
@@ -270,6 +277,11 @@ def render_chat_interface(settings: Dict[str, Any]) -> None:
                 # Metrics pills
                 if msg.get("metrics"):
                     _render_metrics_pills(msg["metrics"])
+                # Adaptive reasoning trace
+                if msg.get("metrics", {}).get("diagnostic_trace"):
+                    with st.expander("🧠 Adaptive Routing & Reasoning Trace", expanded=False):
+                        for step in msg["metrics"]["diagnostic_trace"]:
+                            st.markdown(f"- {step}")
                 # Citations
                 if msg.get("citations"):
                     with st.expander("📋 Citations", expanded=False):
@@ -344,62 +356,63 @@ def _handle_user_message(query: str, settings: Dict[str, Any]) -> None:
         )
         return
 
-    # ── Run hybrid retrieval ────────────────────────────────────
+    # ── Run adaptive retrieval & generation workflow ────────────
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Searching through your documents…"):
+        with st.spinner("🧠 RAGNEXUS Adaptive Reasoning & Retrieval…"):
             start_total = time.time()
             try:
-                hybrid_retriever = HybridRetriever(
-                    faiss_index=st.session_state["faiss_index"],
-                    keyword_retriever=st.session_state["keyword_retriever"],
+                faiss_idx = st.session_state.get("faiss_index")
+                semantic_ret = SemanticRetriever(faiss_idx) if faiss_idx else None
+                keyword_ret = st.session_state.get("keyword_retriever")
+                pageindex_ret = st.session_state.get("pageindex_retriever")
+                hybrid_ret = (
+                    HybridRetriever(
+                        semantic_retriever=semantic_ret,
+                        keyword_retriever=keyword_ret,
+                    )
+                    if semantic_ret and keyword_ret
+                    else None
                 )
-                top_k: int = settings.get("top_k", 5)
-                retrieved_chunks, retrieval_meta = hybrid_retriever.retrieve(
-                    query=query,
-                    top_k_semantic=top_k,
-                    top_k_bm25=top_k,
-                )
-                retrieval_time = retrieval_meta.get("retrieval_time_ms", 0)
-            except Exception as exc:
-                st.error(f"Retrieval failed: {exc}")
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": f"❌ Retrieval failed: {exc}",
-                        "citations": [],
-                        "chunks": [],
-                        "metrics": {},
-                    }
-                )
-                return
 
-        # ── Generate answer ─────────────────────────────────────
-        with st.spinner("🤖 Generating answer…"):
-            try:
                 llm = get_groq_llm(
                     model_name=settings.get("model_name", ""),
                     api_key=api_key,
                 )
 
-                # Build context: retrieved chunks + recent conversation
-                context_chunks = [
-                    c.get("document") for c in retrieved_chunks if c.get("document")
-                ]
-
-                # Append conversation history for follow-up handling
-                history_context = _build_context_from_history(messages, last_n=5)
-
-                answer, generation_time = generate_answer(
+                final_state = run_adaptive_rag(
                     query=query,
-                    context_chunks=context_chunks,
+                    semantic_retriever=semantic_ret,
+                    keyword_retriever=keyword_ret,
+                    pageindex_retriever=pageindex_ret,
+                    hybrid_retriever=hybrid_ret,
                     llm=llm,
+                    max_retries=2,
                 )
+
+                answer = final_state.get("answer", "")
+                retrieved_chunks = final_state.get("retrieved_chunks", [])
+                citations = final_state.get("citations", [])
+                strategy = final_state.get("strategy", "hybrid")
+                retries = final_state.get("retry_count", 0)
+                diagnostic_trace = final_state.get("diagnostic_trace", [])
+
             except Exception as exc:
-                st.error(f"Generation failed: {exc}")
+                err_msg = str(exc)
+                if "model_not_found" in err_msg or "404" in err_msg:
+                    help_note = (
+                        f"❌ **Model Error:** The model `{settings.get('model_name')}` is not accessible with your Groq API key.\n\n"
+                        f"👉 **Fix:** Check **Model Settings** in the sidebar and choose an active model supported by your account (such as **GPT-OSS 120B** or **Qwen 3.8 27B**)."
+                    )
+                    st.error(help_note)
+                    msg_content = help_note
+                else:
+                    st.error(f"Workflow execution failed: {exc}")
+                    msg_content = f"❌ Workflow execution failed: {exc}"
+
                 messages.append(
                     {
                         "role": "assistant",
-                        "content": f"❌ Generation failed: {exc}",
+                        "content": msg_content,
                         "citations": [],
                         "chunks": [],
                         "metrics": {},
@@ -410,15 +423,13 @@ def _handle_user_message(query: str, settings: Dict[str, Any]) -> None:
         end_total = time.time()
         total_time = (end_total - start_total) * 1000  # ms
 
-        # ── Build citations ─────────────────────────────────────
-        citations = format_citations(retrieved_chunks)
-
         # ── Assemble metrics ────────────────────────────────────
         metrics: Dict[str, Any] = {
-            "retrieval_time_ms": retrieval_time,
-            "generation_time_ms": generation_time,
+            "strategy": strategy,
+            "retries": retries,
             "total_time_ms": total_time,
             "num_chunks": len(retrieved_chunks),
+            "diagnostic_trace": diagnostic_trace,
         }
 
         # ── Display answer ──────────────────────────────────────
@@ -426,6 +437,12 @@ def _handle_user_message(query: str, settings: Dict[str, Any]) -> None:
 
         # Metrics pills
         _render_metrics_pills(metrics)
+
+        # Adaptive trace expander
+        if diagnostic_trace:
+            with st.expander("🧠 Adaptive Routing & Reasoning Trace", expanded=False):
+                for step in diagnostic_trace:
+                    st.markdown(f"- {step}")
 
         # Citations expander
         if citations:
@@ -447,3 +464,4 @@ def _handle_user_message(query: str, settings: Dict[str, Any]) -> None:
                 "metrics": metrics,
             }
         )
+

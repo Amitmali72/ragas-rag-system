@@ -39,30 +39,25 @@ logger = logging.getLogger(__name__)
 # Percentage-improvement helper
 # ===================================================================
 
-def calculate_improvement(baseline_score: float, rag_score: float) -> float:
+def calculate_improvement(baseline_score: Optional[float], rag_score: Optional[float]) -> Optional[float]:
     """Calculate percentage improvement of RAG over a baseline.
 
     Parameters
     ----------
-    baseline_score : float
+    baseline_score : float or None
         The metric value from the baseline (direct LLM) approach.
-    rag_score : float
+    rag_score : float or None
         The metric value from the Hybrid RAG approach.
 
     Returns
     -------
-    float
-        Percentage improvement.  Positive means RAG is better.
-        Returns ``0.0`` if the baseline score is zero to avoid
-        division-by-zero.
-
-    Examples
-    --------
-    >>> calculate_improvement(0.60, 0.78)
-    30.0
-    >>> calculate_improvement(0.0, 0.85)
-    0.0
+    float or None
+        Percentage improvement. Positive means RAG is better.
+        Returns None if either score is None.
+        Returns 0.0 if the baseline score is zero.
     """
+    if baseline_score is None or rag_score is None:
+        return None
     if baseline_score == 0.0:
         return 0.0
     return round(((rag_score - baseline_score) / baseline_score) * 100.0, 2)
@@ -390,11 +385,14 @@ def format_comparison_dataframe(results: Dict[str, Any]) -> pd.DataFrame:
 
     rows: List[Dict[str, Any]] = []
     for metric in metric_names:
+        b_val = baseline_agg.get(metric)
+        r_val = rag_agg.get(metric)
+        imp_val = improvements.get(metric)
         rows.append({
             "Metric": pretty_names.get(metric, metric),
-            "Baseline (LLM)": round(baseline_agg.get(metric, 0.0), 4),
-            "Hybrid RAG": round(rag_agg.get(metric, 0.0), 4),
-            "Improvement (%)": improvements.get(metric, 0.0),
+            "Baseline (LLM)": round(b_val, 4) if isinstance(b_val, (int, float)) else "N/A",
+            "Hybrid RAG": round(r_val, 4) if isinstance(r_val, (int, float)) else "N/A",
+            "Improvement (%)": imp_val if imp_val is not None else "N/A",
         })
 
     return pd.DataFrame(rows)

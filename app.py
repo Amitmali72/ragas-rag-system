@@ -24,16 +24,17 @@ from frontend.evaluation_dashboard import render_evaluation_dashboard
 # Page configuration (MUST be the first Streamlit command)
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Knowledge Copilot",
-    page_icon="🧠",
+    page_title="RAGNEXUS | Adaptive Knowledge Retrieval",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
         "Get Help": None,
         "Report a bug": None,
         "About": (
-            "**Knowledge Copilot** – A Hybrid RAG system combining semantic "
-            "and keyword retrieval for accurate, cited answers."
+            "**RAGNEXUS** – An Adaptive Knowledge Retrieval and Reasoning System "
+            "combining multi-signal LangGraph routing, 4-way retrieval (Vector, "
+            "BM25, PageIndex, Hybrid), and empirical benchmarking."
         ),
     },
 )
@@ -205,6 +206,7 @@ def _init_app_state() -> None:
         "chunks": [],
         "faiss_index": None,
         "keyword_retriever": None,
+        "pageindex_retriever": None,
         "file_names": [],
         "num_chunks": 0,
         "num_documents": 0,
@@ -226,8 +228,8 @@ def _render_header() -> None:
         f"""
         <div class="app-header">
             <div class="header-left">
-                <h1>🧠 Knowledge Copilot</h1>
-                <p>Hybrid RAG · Semantic + Keyword Retrieval · Powered by Groq</p>
+                <h1>⚡ RAGNEXUS</h1>
+                <p>Adaptive Knowledge Retrieval & Reasoning · LangGraph · Vector · BM25 · PageIndex · Hybrid</p>
             </div>
             <div class="header-right">
                 <span class="header-badge">{docs_status}</span>
@@ -244,11 +246,12 @@ def _render_footer() -> None:
     st.markdown(
         """
         <div class="app-footer">
-            <strong>Knowledge Copilot</strong> · Hybrid RAG System ·
+            <strong>RAGNEXUS</strong> · Adaptive Knowledge Retrieval & Reasoning System ·
             Built with
+            <a href="https://langchain-ai.github.io/langgraph/" target="_blank">LangGraph</a>,
             <a href="https://streamlit.io" target="_blank">Streamlit</a>,
             <a href="https://groq.com" target="_blank">Groq</a>,
-            FAISS & BM25
+            FAISS, BM25 & PageIndex
         </div>
         """,
         unsafe_allow_html=True,

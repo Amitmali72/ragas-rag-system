@@ -86,12 +86,12 @@ def parse_docx(file: Any) -> List[Dict[str, Any]]:
 
 
 def parse_txt(file: Any) -> List[Dict[str, Any]]:
-    """Parse a plain text file.
+    """Parse a plain text file or string.
 
     The entire file content is treated as a single page.
 
     Args:
-        file: A Streamlit UploadedFile or file-like object with .name and .read().
+        file: A Streamlit UploadedFile, file-like object with .read(), or a raw str.
 
     Returns:
         List of dicts with a single entry containing 'text', 'source', and 'page_number'.
@@ -99,18 +99,27 @@ def parse_txt(file: Any) -> List[Dict[str, Any]]:
     documents: List[Dict[str, Any]] = []
 
     try:
-        raw_bytes = file.read()
-        text = raw_bytes.decode("utf-8", errors="replace")
+        if isinstance(file, str):
+            text = file
+            source = "text_input"
+        else:
+            raw_data = file.read()
+            if isinstance(raw_data, bytes):
+                text = raw_data.decode("utf-8", errors="replace")
+            else:
+                text = str(raw_data)
+            source = getattr(file, "name", "unknown.txt")
 
         if text.strip():
             documents.append({
                 "text": text,
-                "source": file.name,
+                "source": source,
                 "page_number": 1,
             })
 
     except Exception as e:
-        raise ValueError(f"Error parsing TXT file '{file.name}': {e}") from e
+        filename = getattr(file, "name", "text") if not isinstance(file, str) else "string"
+        raise ValueError(f"Error parsing TXT file '{filename}': {e}") from e
 
     return documents
 

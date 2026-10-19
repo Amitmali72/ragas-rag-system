@@ -18,10 +18,14 @@ import plotly.express as px
 from typing import Dict, List, Any, Optional
 
 # --- Backend imports ---
+from datetime import datetime
 from retrieval.hybrid_retriever import HybridRetriever
+from retrieval.pageindex_retriever import PageIndexRetriever
 from llm.groq_llm import get_groq_llm, generate_answer, generate_direct_answer
+from langchain_core.messages import HumanMessage
 from evaluation.ragas_evaluator import evaluate_rag
 from evaluation.comparison import run_comparison
+from evaluation.benchmark_suite import FourWayBenchmarkRunner
 from utils.helpers import format_time
 
 
@@ -84,9 +88,67 @@ SAMPLE_EVAL_DATA: List[Dict[str, str]] = [
     },
 ]
 
+# Standard benchmark cases for 4-Way Retrieval Benchmark
+DEFAULT_BENCHMARK_CASES: List[Dict[str, str]] = [
+    {
+        "question": "What is the core architecture and methodology described in the document?",
+        "ground_truth": "The core architecture uses multi-stage retrieval combining dense vector search, sparse keyword indexing, and structure-aware navigation.",
+    },
+    {
+        "question": "How does BM25 or keyword frequency ranking function in retrieval?",
+        "ground_truth": "BM25 scores documents based on term frequency, inverse document frequency, and document length normalization to match exact keywords.",
+    },
+    {
+        "question": "What are the section headings, outlines, or structural divisions in the document?",
+        "ground_truth": "The document contains numbered sections, titles, and hierarchical outlines capturing key concepts and conclusions.",
+    },
+    {
+        "question": "How does hybrid fusion combine dense and sparse search rankings?",
+        "ground_truth": "Hybrid retrieval merges candidate rankings using reciprocal rank fusion to balance semantic relevance with lexical precision.",
+    },
+]
+
+def generate_synthetic_samples(docs: List[Any], llm: Any, num_samples: int = 3) -> List[Dict[str, str]]:
+    """
+    Generate synthetic question-answer pairs based on a set of documents.
+    """
+    # Combine some document content to give the LLM a representative sample
+    context_texts = []
+    for doc in docs[:5]: # Use first few docs to avoid token limits
+        content = doc.page_content if hasattr(doc, "page_content") else str(doc)
+        context_texts.append(content[:1000])
+
+    combined_context = "\n\n---\n\n".join(context_texts)
+
+    prompt = (
+        f"Based on the following document excerpts, generate {num_samples} high-quality "
+        f"evaluation pairs. Each pair must consist of a 'question' and a 'ground_truth' answer "
+        f"that can be directly verified from the text.\n\n"
+        f"Context:\n{combined_context}\n\n"
+        f"Return the result ONLY as a valid JSON list of objects with keys 'question' and 'ground_truth'. "
+        f"Example: [{{'question': '...', 'ground_truth': '...'}}]"
+    )
+
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        # Clean response in case LLM adds markdown code blocks
+        content = response.content.strip()
+        if content.startswith("```json"):
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif content.startswith("```"):
+            content = content.split("```")[1].split("```")[0].strip()
+
+        return json.loads(content)
+    except Exception as e:
+        st.error(f"Failed to generate samples: {e}")
+        return []
+
+
 
 def _score_badge(score: float) -> str:
     """Return an HTML score badge with colour based on threshold."""
+    if score is None:
+        return '<span class="score-badge poor">N/A</span>'
     if score >= 0.8:
         cls = "good"
     elif score >= 0.5:
@@ -253,9 +315,35 @@ def _render_ragas_tab(settings: Dict[str, Any]) -> None:
 
     with col_sample:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("📋 Use Samples", use_container_width=True):
-            eval_data = SAMPLE_EVAL_DATA
-            st.info(f"Using **{len(SAMPLE_EVAL_DATA)}** sample questions.")
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("📋 Use Static", use_container_width=True):
+                eval_data = SAMPLE_EVAL_DATA
+                st.info(f"Using **{len(SAMPLE_EVAL_DATA)}** static samples.")
+        with col_btn2:
+            if st.button("🪄 Auto-Gen", use_container_width=True):
+                if not st.session_state.get("documents_processed"):
+                    st.error("Process docs first!")
+                else:
+                    with st.spinner("Generating samples..."):
+                        api_key = settings.get("api_key", "")
+                        llm = get_groq_llm(model_name=settings["model_name"], api_key=api_key)
+                        # Get a few docs from the session state index or similar
+                        # Since we don't have direct access to the doc list in session_state,
+                        # we'll use the hybrid retriever to get a few random chunks as seeds
+                        hybrid_retriever = HybridRetriever(
+                            faiss_index=st.session_state["faiss_index"],
+                            keyword_retriever=st.session_state["keyword_retriever"],
+                        )
+                        seed_chunks, _ = hybrid_retriever.retrieve("General overview of the document", 5, 5)
+                        docs = [c["document"] for c in seed_chunks if "document" in c]
+
+                        eval_data = generate_synthetic_samples(docs, llm)
+                        if eval_data:
+                            st.success(f"Generated **{len(eval_data)}** samples!")
+                        else:
+                            st.error("Could not generate samples.")
+
 
     # Persist eval data in session state so it survives button clicks
     if eval_data is not None:
@@ -331,7 +419,7 @@ def _render_ragas_tab(settings: Dict[str, Any]) -> None:
     # Run RAGAS evaluation
     progress.progress(85, text="Computing RAGAS metrics…")
     try:
-        ragas_results = evaluate_rag(results)
+        ragas_results = evaluate_rag(results, llm=llm)
     except Exception as exc:
         progress.empty()
         st.error(f"RAGAS evaluation failed: {exc}")
@@ -363,7 +451,7 @@ def _display_ragas_results(ragas_results: Any) -> None:
         with col:
             st.metric(
                 label=name.replace("_", " ").title(),
-                value=f"{val:.3f}",
+                value=f"{val:.3f}" if val is not None else "N/A",
             )
 
     # ── Radar chart ─────────────────────────────────────────────
@@ -610,12 +698,12 @@ def _display_comparison_results(results: Any) -> None:
         for m in metric_names:
             d_val = direct_metrics.get(m, 0) if isinstance(direct_metrics, dict) else 0
             r_val = rag_metrics.get(m, 0) if isinstance(rag_metrics, dict) else 0
-            improvement = ((r_val - d_val) / d_val * 100) if d_val != 0 else 0
+            improvement = ((r_val - d_val) / d_val * 100) if d_val and d_val != 0 else 0
             summary_rows.append(
                 {
                     "Metric": m.replace("_", " ").title(),
-                    "Direct LLM": f"{d_val:.3f}",
-                    "Hybrid RAG": f"{r_val:.3f}",
+                    "Direct LLM": f"{d_val:.3f}" if d_val is not None else "N/A",
+                    "Hybrid RAG": f"{r_val:.3f}" if r_val is not None else "N/A",
                     "Improvement": f"{improvement:+.1f}%",
                 }
             )
@@ -626,21 +714,266 @@ def _display_comparison_results(results: Any) -> None:
         )
 
 
+def _display_benchmark_results(benchmark_output: Dict[str, Any]) -> None:
+    """Render comprehensive benchmark visualizations, comparison tables, and case drills."""
+    summary = benchmark_output.get("summary", {})
+    results = benchmark_output.get("results", [])
+    total_cases = benchmark_output.get("total_test_cases", 0)
+    top_k = benchmark_output.get("top_k", 5)
+
+    st.markdown("---")
+    st.markdown("### 📊 Benchmark Summary")
+    st.caption(f"Evaluated **{total_cases}** test cases with **top_k = {top_k}** across all 4 retrieval strategies.")
+
+    # ── Top-level stat cards ─────────────────────────────────────
+    col_v, col_b, col_p, col_h = st.columns(4)
+    strat_cols = {
+        "vector": (col_v, "🟢 1. Vector (FAISS)", "#4ade80"),
+        "bm25": (col_b, "🔵 2. BM25 (Keyword)", "#38bdf8"),
+        "pageindex": (col_p, "🟡 3. PageIndex (Structure)", "#fbbf24"),
+        "hybrid": (col_h, "🟣 4. Hybrid (Dense+Sparse)", "#a78bfa"),
+    }
+
+    for strat_key, (col, label, color) in strat_cols.items():
+        stats = summary.get(strat_key, {})
+        avg_time = stats.get("avg_retrieval_time_ms", 0.0)
+        avg_chunks = stats.get("avg_chunks_retrieved", 0.0)
+        overlap = stats.get("avg_ground_truth_overlap", 0.0)
+        errors = stats.get("error_count", 0)
+
+        with col:
+            st.markdown(
+                f"""
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-left: 4px solid {color}; border-radius: 8px; padding: 0.8rem; margin-bottom: 0.8rem;">
+                    <strong style="color: {color}; font-size: 0.85rem;">{label}</strong>
+                    <div style="font-size: 1.4rem; font-weight: 700; margin-top: 0.3rem;">{avg_time:.1f} <span style="font-size: 0.75rem; font-weight: normal; color: #888;">ms</span></div>
+                    <div style="font-size: 0.75rem; color: #aaa; margin-top: 0.2rem;">
+                        📦 Avg Chunks: <b>{avg_chunks:.1f}</b><br>
+                        🎯 GT Overlap: <b>{overlap:.1%}</b><br>
+                        {'⚠️ Errors: <span style="color:#f87171;">' + str(errors) + '</span>' if errors > 0 else '✅ 0 Errors'}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # ── Comparison DataFrame Table ──────────────────────────────
+    st.markdown("##### 📋 Side-by-Side Comparison Matrix")
+    summary_df = FourWayBenchmarkRunner.format_summary_dataframe(benchmark_output)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    # ── Visual Plotly Charts ─────────────────────────────────────
+    col_chart1, col_chart2 = st.columns(2)
+
+    with col_chart1:
+        st.markdown("##### ⏱️ Retrieval Latency Comparison")
+        latencies = [summary.get(k, {}).get("avg_retrieval_time_ms", 0.0) for k in ["vector", "bm25", "pageindex", "hybrid"]]
+        strat_names = ["Vector", "BM25", "PageIndex", "Hybrid"]
+        colors = ["#4ade80", "#38bdf8", "#fbbf24", "#a78bfa"]
+
+        fig_lat = go.Figure(
+            data=[go.Bar(x=strat_names, y=latencies, marker_color=colors, text=[f"{val:.1f} ms" for val in latencies], textposition="auto")]
+        )
+        fig_lat.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#FAFAFA"),
+            yaxis=dict(title="Milliseconds (ms)", gridcolor="rgba(108,99,255,0.08)"),
+            margin=dict(l=40, r=20, t=30, b=30),
+            height=300,
+        )
+        st.plotly_chart(fig_lat, use_container_width=True)
+
+    with col_chart2:
+        st.markdown("##### 🎯 Ground Truth Lexical Overlap")
+        overlaps = [summary.get(k, {}).get("avg_ground_truth_overlap", 0.0) * 100 for k in ["vector", "bm25", "pageindex", "hybrid"]]
+        fig_ov = go.Figure(
+            data=[go.Bar(x=strat_names, y=overlaps, marker_color=colors, text=[f"{val:.1f}%" for val in overlaps], textposition="auto")]
+        )
+        fig_ov.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#FAFAFA"),
+            yaxis=dict(title="Overlap (%)", range=[0, 100], gridcolor="rgba(108,99,255,0.08)"),
+            margin=dict(l=40, r=20, t=30, b=30),
+            height=300,
+        )
+        st.plotly_chart(fig_ov, use_container_width=True)
+
+    # ── Per-Case Detailed Inspection ─────────────────────────────
+    st.markdown("##### 🔍 Test Case Breakdown")
+    for case in results:
+        case_id = case.get("case_id", 1)
+        q_text = case.get("question", "")
+        gt_text = case.get("ground_truth", "")
+
+        with st.expander(f"Case {case_id}: {q_text[:85]}…", expanded=False):
+            if gt_text:
+                st.caption(f"**Ground Truth Reference:** {gt_text}")
+
+            t_vec, t_bm, t_pg, t_hyb = st.tabs(["🟢 Vector", "🔵 BM25", "🟡 PageIndex", "🟣 Hybrid"])
+            tabs_map = {
+                "vector": t_vec,
+                "bm25": t_bm,
+                "pageindex": t_pg,
+                "hybrid": t_hyb,
+            }
+
+            for s_key, tab in tabs_map.items():
+                s_data = case["strategies"].get(s_key, {})
+                with tab:
+                    if s_data.get("error"):
+                        st.error(f"❌ Error: {s_data['error']}")
+                    else:
+                        st.markdown(
+                            f"**Latency:** `{s_data.get('retrieval_time_ms', 0)} ms` &nbsp;|&nbsp; "
+                            f"**Chunks:** `{s_data.get('num_chunks', 0)}` &nbsp;|&nbsp; "
+                            f"**GT Overlap:** `{s_data.get('ground_truth_overlap', 0):.1%}`"
+                        )
+                        if s_data.get("sources"):
+                            st.caption(f"**Sources:** {', '.join(s_data['sources'])}")
+
+                        # Answer if generated
+                        if s_data.get("answer"):
+                            st.markdown(f"**Generated Answer:**\n\n{s_data['answer']}")
+
+                        # Snippets
+                        snippets = s_data.get("chunks_preview", [])
+                        if snippets:
+                            st.markdown("**Top Retrieved Chunks:**")
+                            for idx_snip, snip in enumerate(snippets, start=1):
+                                st.markdown(
+                                    f"> **{idx_snip}.** {snip['text']} "
+                                    f"*(Source: `{snip.get('source', 'N/A')}`, Score: `{snip.get('score', 0):.3f}`)*"
+                                )
+
+    # ── Export JSON Button ──────────────────────────────────────
+    st.markdown("---")
+    col_dl, _ = st.columns([1, 2])
+    with col_dl:
+        json_output = json.dumps(benchmark_output, indent=2)
+        st.download_button(
+            label="📥 Download Full Benchmark JSON",
+            data=json_output,
+            file_name=f"ragnexus_benchmark_4way_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+
+def _render_benchmark_tab(settings: Dict[str, Any]) -> None:
+    """Render the 4-Way Retrieval Benchmark tab."""
+    st.markdown("#### 🏆 4-Way Retrieval Benchmark (Vector vs BM25 vs PageIndex vs Hybrid)")
+    st.caption(
+        "Execute a standardized, empirical comparison across all four retrieval strategies "
+        "on identical queries. Compare latency, chunk counts, source precision, and lexical grounding "
+        "without simulated metrics."
+    )
+
+    col_upload, col_sample = st.columns([3, 1])
+    bench_data: Optional[List[Dict[str, str]]] = None
+
+    with col_upload:
+        uploaded_bench = st.file_uploader(
+            "Upload benchmark test cases (JSON)",
+            type=["json"],
+            key="benchmark_upload",
+            help='Format: [{"question": "...", "ground_truth": "..."}]',
+        )
+        if uploaded_bench:
+            try:
+                bench_data = json.load(uploaded_bench)
+                st.success(f"Loaded **{len(bench_data)}** test cases.")
+            except Exception as exc:
+                st.error(f"Invalid JSON: {exc}")
+
+    with col_sample:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("📋 Use Default Suite", use_container_width=True, key="btn_use_default_bench"):
+            bench_data = DEFAULT_BENCHMARK_CASES
+            st.info(f"Using **{len(DEFAULT_BENCHMARK_CASES)}** default benchmark questions.")
+
+    if bench_data is not None:
+        st.session_state["benchmark_data"] = bench_data
+    bench_data = st.session_state.get("benchmark_data")
+
+    if not bench_data:
+        st.info("💡 Upload a JSON test set or click **'Use Default Suite'** to begin.")
+        if "benchmark_output" in st.session_state:
+            _display_benchmark_results(st.session_state["benchmark_output"])
+        return
+
+    with st.expander("👀 Preview Benchmark Test Cases", expanded=False):
+        st.dataframe(pd.DataFrame(bench_data), use_container_width=True, hide_index=True)
+
+    # ── Benchmark execution options ──────────────────────────────
+    col_opt1, col_opt2 = st.columns([1, 1])
+    with col_opt1:
+        gen_answers = st.checkbox(
+            "Generate LLM Answers for each strategy",
+            value=False,
+            help="Condition LLM generation on retrieved chunks for each strategy. Requires Groq API key and increases execution time.",
+        )
+
+    # Pre-flight check before execution
+    if not st.session_state.get("documents_processed"):
+        st.warning("⚠️ Please upload and process documents in the sidebar first before running the benchmark.")
+        return
+
+    if st.button("🚀 Run 4-Way Benchmark", type="primary", key="btn_run_benchmark"):
+        api_key = settings.get("api_key", "")
+        llm = None
+        if gen_answers:
+            if not api_key:
+                st.error("🔑 Groq API key is required to generate answers. Please enter it in the sidebar.")
+                return
+            llm = get_groq_llm(model_name=settings["model_name"], api_key=api_key)
+
+        hybrid_retriever = None
+        if st.session_state.get("faiss_index") and st.session_state.get("keyword_retriever"):
+            hybrid_retriever = HybridRetriever(
+                faiss_index=st.session_state["faiss_index"],
+                keyword_retriever=st.session_state["keyword_retriever"],
+            )
+
+        runner = FourWayBenchmarkRunner(
+            semantic_retriever=st.session_state.get("faiss_index"),
+            keyword_retriever=st.session_state.get("keyword_retriever"),
+            pageindex_retriever=st.session_state.get("pageindex_retriever"),
+            hybrid_retriever=hybrid_retriever,
+            llm=llm,
+            top_k=settings.get("top_k", 5),
+        )
+
+        with st.spinner("Running 4-Way Retrieval Benchmark across all test cases..."):
+            try:
+                benchmark_output = runner.run_benchmark(bench_data, generate_answers=gen_answers)
+                report_path = runner.save_benchmark_report(benchmark_output)
+                st.session_state["benchmark_output"] = benchmark_output
+                st.success(f"✅ Benchmark completed successfully! Report saved to `{report_path}`.")
+            except Exception as exc:
+                st.error(f"Benchmark failed: {exc}")
+                return
+
+    if "benchmark_output" in st.session_state:
+        _display_benchmark_results(st.session_state["benchmark_output"])
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def render_evaluation_dashboard(settings: Dict[str, Any]) -> None:
     """
-    Render the full evaluation dashboard with RAGAS and comparison tabs.
+    Render the full evaluation dashboard with RAGAS, comparison, and 4-way benchmark tabs.
 
     Args:
         settings: Dict returned by ``sidebar.render_sidebar()``.
     """
     st.markdown(EVAL_CSS, unsafe_allow_html=True)
 
-    tab_ragas, tab_compare = st.tabs(
-        ["📊 RAGAS Evaluation", "⚔️ LLM vs RAG Comparison"]
+    tab_ragas, tab_compare, tab_bench = st.tabs(
+        ["📊 RAGAS Evaluation", "⚔️ LLM vs RAG Comparison", "🏆 4-Way Retrieval Benchmark"]
     )
 
     with tab_ragas:
@@ -648,3 +981,6 @@ def render_evaluation_dashboard(settings: Dict[str, Any]) -> None:
 
     with tab_compare:
         _render_comparison_tab(settings)
+
+    with tab_bench:
+        _render_benchmark_tab(settings)

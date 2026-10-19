@@ -34,5 +34,10 @@ data/uploads/
 .DS_Store
 Thumbs.db
 
+# Testing & Benchmarks
+.pytest_cache/
+data/benchmarks/*.json
+!data/benchmarks/.gitkeep
+
 # Streamlit
 .streamlit/secrets.toml

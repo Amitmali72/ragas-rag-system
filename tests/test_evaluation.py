@@ -154,7 +154,7 @@ class TestRagasEvaluator:
         sample_contexts: List[List[str]],
         sample_ground_truths: List[str],
     ) -> None:
-        """All aggregate scores should be between 0 and 1."""
+        """All aggregate scores should be between 0 and 1, or None if unavailable."""
         results = evaluate_rag(
             questions=sample_questions,
             answers=sample_answers,
@@ -163,7 +163,11 @@ class TestRagasEvaluator:
         )
 
         for metric, score in results["aggregate"].items():
-            assert 0.0 <= score <= 1.0, f"{metric} score {score} out of range [0, 1]"
+            if score is not None:
+                assert 0.0 <= score <= 1.0, f"{metric} score {score} out of range [0, 1]"
+            else:
+                assert results["ragas_available"] is False
+                assert results["status"] == "unavailable"
 
     def test_per_question_count_matches(
         self,

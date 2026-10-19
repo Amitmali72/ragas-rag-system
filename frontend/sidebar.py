@@ -19,6 +19,7 @@ from config.settings import (
     DEFAULT_GROQ_MODEL,
     GROQ_API_KEY,
     SUPPORTED_FILE_TYPES,
+    get_available_groq_models,
 )
 from ingestion.file_parser import parse_file
 from ingestion.text_cleaner import clean_documents
@@ -30,6 +31,7 @@ from embeddings.embedding_manager import (
     load_faiss_index,
 )
 from retrieval.keyword_retriever import KeywordRetriever
+from retrieval.pageindex_retriever import PageIndexRetriever
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +212,17 @@ def _run_ingestion_pipeline(
     progress.progress(85, text="📚 Building keyword index…")
     keyword_retriever = KeywordRetriever(chunks)
 
+    # ── Step 5b: Build structure-aware PageIndex retriever ───────
+    progress.progress(90, text="📑 Building structure-aware PageIndex…")
+    pageindex_retriever = PageIndexRetriever(chunks)
+
     # ── Step 6: Save artefacts to session_state ─────────────────
     progress.progress(95, text="💾 Saving artefacts…")
     st.session_state["documents_processed"] = True
     st.session_state["chunks"] = chunks
     st.session_state["faiss_index"] = faiss_index
     st.session_state["keyword_retriever"] = keyword_retriever
+    st.session_state["pageindex_retriever"] = pageindex_retriever
     st.session_state["file_names"] = file_names
     st.session_state["num_chunks"] = len(chunks)
     st.session_state["num_documents"] = len(set(file_names))
@@ -234,6 +241,7 @@ def _clear_all() -> None:
         "chunks",
         "faiss_index",
         "keyword_retriever",
+        "pageindex_retriever",
         "file_names",
         "num_chunks",
         "num_documents",
@@ -269,8 +277,8 @@ def render_sidebar() -> Dict[str, Any]:
         st.markdown(
             """
             <div class="sidebar-brand">
-                <h1>🧠 Knowledge Copilot</h1>
-                <p>Hybrid RAG • Semantic + Keyword Search</p>
+                <h1>⚡ RAGNEXUS</h1>
+                <p>Adaptive Knowledge Retrieval & Reasoning</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -342,31 +350,30 @@ def render_sidebar() -> Dict[str, Any]:
             unsafe_allow_html=True,
         )
 
-        # Build display list for the selectbox and resolve default index
-        model_options: List[str] = list(GROQ_MODELS.keys())
-        default_display = "Llama 3.3 70B"
-        for disp_name, api_id in GROQ_MODELS.items():
+        api_key: str = st.text_input(
+            "Groq API Key",
+            value=st.session_state.get("groq_api_key_input", GROQ_API_KEY or ""),
+            type="password",
+            help="Enter your Groq API key. Stored only in this session.",
+            key="groq_api_key_input",
+        )
+
+        # Dynamically discover active models permitted for this API key
+        available_models = get_available_groq_models(api_key)
+        model_options: List[str] = list(available_models.keys())
+
+        # Resolve default selection index
+        default_index: int = 0
+        for idx, (disp_name, api_id) in enumerate(available_models.items()):
             if api_id == DEFAULT_GROQ_MODEL:
-                default_display = disp_name
+                default_index = idx
                 break
 
-        default_index: int = (
-            model_options.index(default_display)
-            if default_display in model_options
-            else 0
-        )
         model_name: str = st.selectbox(
             "Groq Model",
             options=model_options,
             index=default_index,
             help="Select the LLM served via Groq for answer generation.",
-        )
-
-        api_key: str = st.text_input(
-            "Groq API Key",
-            value=GROQ_API_KEY or "",
-            type="password",
-            help="Enter your Groq API key. Stored only in this session.",
         )
 
         # ── Action Buttons ──────────────────────────────────────
@@ -412,11 +419,15 @@ def render_sidebar() -> Dict[str, Any]:
                     <span class="stat-value">{st.session_state['num_chunks']}</span>
                 </div>
                 <div class="sidebar-stat-row">
-                    <span class="stat-label">Index</span>
+                    <span class="stat-label">Vector Index</span>
                     <span class="stat-value">FAISS ✅</span>
                 </div>
                 <div class="sidebar-stat-row">
-                    <span class="stat-label">BM25</span>
+                    <span class="stat-label">BM25 Index</span>
+                    <span class="stat-value">Ready ✅</span>
+                </div>
+                <div class="sidebar-stat-row">
+                    <span class="stat-label">PageIndex</span>
                     <span class="stat-value">Ready ✅</span>
                 </div>
                 """,
@@ -428,7 +439,7 @@ def render_sidebar() -> Dict[str, Any]:
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
         "top_k": top_k,
-        "model_name": GROQ_MODELS.get(model_name, model_name),
+        "model_name": available_models.get(model_name, model_name),
         "api_key": api_key,
         "uploaded_files": uploaded_files or [],
     }

@@ -110,34 +110,28 @@ class TestParseTxt:
     """Tests for parsing raw text from .txt files."""
 
     def test_basic_parse(self, sample_text: str) -> None:
-        """parse_txt should return the full text content as a string."""
-        try:
-            from ingestion.parser import parse_txt
-            result = parse_txt(sample_text)
-            assert isinstance(result, str)
-            assert "Machine learning" in result
-        except ImportError:
-            # Module may not exist yet – test the concept
-            result = sample_text.strip()
-            assert "Machine learning" in result
+        """parse_txt should return the full text content as a string or list of dicts."""
+        from ingestion.file_parser import parse_txt
+        result = parse_txt(sample_text)
+        assert isinstance(result, list)
+        assert len(result) > 0
+        assert "Machine learning" in result[0]["text"]
+        assert result[0]["page_number"] == 1
 
     def test_uploaded_file_parse(self, mock_uploaded_txt: MockUploadedFile) -> None:
         """Should handle a Streamlit-like uploaded file object."""
-        content = mock_uploaded_txt.read().decode("utf-8")
-        mock_uploaded_txt.seek(0)  # reset for potential re-reads
-
-        assert isinstance(content, str)
-        assert len(content) > 0
-        assert "Machine learning" in content
+        from ingestion.file_parser import parse_txt
+        results = parse_txt(mock_uploaded_txt)
+        assert isinstance(results, list)
+        assert len(results) > 0
+        assert "Machine learning" in results[0]["text"]
+        assert results[0]["source"] == "test_document.txt"
 
     def test_empty_content(self) -> None:
         """parse_txt should handle empty strings gracefully."""
-        try:
-            from ingestion.parser import parse_txt
-            result = parse_txt("")
-            assert result == "" or result is not None
-        except ImportError:
-            assert "" == ""  # trivial fallback
+        from ingestion.file_parser import parse_txt
+        result = parse_txt("")
+        assert result == []
 
     def test_seek_resets_position(self, mock_uploaded_txt: MockUploadedFile) -> None:
         """After read + seek(0), re-reading should give the same content."""
@@ -156,48 +150,34 @@ class TestTextCleaning:
 
     def test_collapse_whitespace(self, dirty_text: str) -> None:
         """Multiple spaces/tabs should be collapsed to a single space."""
-        try:
-            from ingestion.parser import clean_text
-            cleaned = clean_text(dirty_text)
-        except ImportError:
-            import re
-            cleaned = re.sub(r"[ \t]+", " ", dirty_text)
+        from ingestion.text_cleaner import clean_text
+        cleaned = clean_text(dirty_text)
 
         assert "   " not in cleaned
         assert "\t" not in cleaned
 
     def test_unicode_normalization(self) -> None:
         """Non-breaking spaces (\u00a0) should be replaced with regular spaces."""
+        from ingestion.text_cleaner import clean_text
         text_with_nbsp = "Hello\u00a0World"
-        try:
-            from ingestion.parser import clean_text
-            cleaned = clean_text(text_with_nbsp)
-        except ImportError:
-            cleaned = text_with_nbsp.replace("\u00a0", " ")
+        cleaned = clean_text(text_with_nbsp)
 
         assert "\u00a0" not in cleaned
         assert "Hello" in cleaned and "World" in cleaned
 
     def test_strip_leading_trailing(self) -> None:
         """Leading/trailing whitespace should be stripped from the result."""
+        from ingestion.text_cleaner import clean_text
         text = "   \n  Some content here.  \n  "
-        try:
-            from ingestion.parser import clean_text
-            cleaned = clean_text(text)
-        except ImportError:
-            cleaned = text.strip()
+        cleaned = clean_text(text)
 
         assert not cleaned.startswith(" ")
         assert not cleaned.endswith(" ")
 
     def test_preserves_single_newlines(self, dirty_text: str) -> None:
         """Single newlines (paragraph breaks) should be preserved or normalised."""
-        try:
-            from ingestion.parser import clean_text
-            cleaned = clean_text(dirty_text)
-        except ImportError:
-            import re
-            cleaned = re.sub(r"\n{3,}", "\n\n", dirty_text)
+        from ingestion.text_cleaner import clean_text
+        cleaned = clean_text(dirty_text)
 
         # Should not have more than 2 consecutive newlines
         assert "\n\n\n" not in cleaned
@@ -212,63 +192,44 @@ class TestChunking:
 
     def test_chunk_output_is_list(self, sample_text: str) -> None:
         """Chunking should return a list of document-like objects."""
-        try:
-            from ingestion.chunker import chunk_text
-            chunks = chunk_text(sample_text, chunk_size=200, chunk_overlap=50)
-            assert isinstance(chunks, list)
-            assert len(chunks) > 0
-        except ImportError:
-            # Simulate chunking for test validation
-            chunks = [sample_text[i:i+200] for i in range(0, len(sample_text), 150)]
-            assert isinstance(chunks, list)
-            assert len(chunks) > 1
+        from ingestion.chunker import chunk_text
+        chunks = chunk_text(sample_text, chunk_size=200, chunk_overlap=50)
+        assert isinstance(chunks, list)
+        assert len(chunks) > 0
 
     def test_chunk_size_respected(self, sample_text: str) -> None:
         """Each chunk should not exceed the specified chunk_size (with small tolerance)."""
+        from ingestion.chunker import chunk_text
         chunk_size = 200
         tolerance = 50  # LangChain splitters may slightly overshoot
-        try:
-            from ingestion.chunker import chunk_text
-            chunks = chunk_text(sample_text, chunk_size=chunk_size, chunk_overlap=50)
-            for chunk in chunks:
-                text = chunk.page_content if hasattr(chunk, "page_content") else str(chunk)
-                assert len(text) <= chunk_size + tolerance, (
-                    f"Chunk too long: {len(text)} > {chunk_size + tolerance}"
-                )
-        except ImportError:
-            chunks = [sample_text[i:i+chunk_size] for i in range(0, len(sample_text), chunk_size - 50)]
-            for chunk in chunks:
-                assert len(chunk) <= chunk_size + tolerance
+        chunks = chunk_text(sample_text, chunk_size=chunk_size, chunk_overlap=50)
+        for chunk in chunks:
+            text = chunk.page_content if hasattr(chunk, "page_content") else str(chunk)
+            assert len(text) <= chunk_size + tolerance, (
+                f"Chunk too long: {len(text)} > {chunk_size + tolerance}"
+            )
 
     def test_chunk_metadata_present(self, sample_text: str) -> None:
-        """Each chunk should carry metadata (at minimum a chunk index)."""
-        try:
-            from ingestion.chunker import chunk_text
-            chunks = chunk_text(sample_text, chunk_size=200, chunk_overlap=50, source="test.txt")
-            for idx, chunk in enumerate(chunks):
-                assert hasattr(chunk, "metadata"), "Chunk is missing metadata attribute"
-                assert "source" in chunk.metadata or "chunk_index" in chunk.metadata
-        except ImportError:
-            pytest.skip("ingestion.chunker not yet implemented")
+        """Each chunk should carry metadata (source, chunk_id, chunk_index)."""
+        from ingestion.chunker import chunk_text
+        chunks = chunk_text(sample_text, chunk_size=200, chunk_overlap=50, source="test.txt")
+        assert len(chunks) > 0
+        for idx, chunk in enumerate(chunks):
+            assert hasattr(chunk, "metadata"), "Chunk is missing metadata attribute"
+            assert chunk.metadata.get("source") == "test.txt"
+            assert "chunk_index" in chunk.metadata
+            assert "chunk_id" in chunk.metadata
 
     def test_overlap_creates_more_chunks(self, sample_text: str) -> None:
         """Higher overlap should produce more chunks than lower overlap."""
-        try:
-            from ingestion.chunker import chunk_text
-            chunks_low = chunk_text(sample_text, chunk_size=200, chunk_overlap=0)
-            chunks_high = chunk_text(sample_text, chunk_size=200, chunk_overlap=100)
-            assert len(chunks_high) >= len(chunks_low)
-        except ImportError:
-            # Simulate
-            low = [sample_text[i:i+200] for i in range(0, len(sample_text), 200)]
-            high = [sample_text[i:i+200] for i in range(0, len(sample_text), 100)]
-            assert len(high) >= len(low)
+        from ingestion.chunker import chunk_text
+        chunks_low = chunk_text(sample_text, chunk_size=200, chunk_overlap=0)
+        chunks_high = chunk_text(sample_text, chunk_size=200, chunk_overlap=100)
+        assert len(chunks_high) >= len(chunks_low)
 
     def test_empty_text_returns_empty(self) -> None:
         """Chunking an empty string should return an empty list."""
-        try:
-            from ingestion.chunker import chunk_text
-            chunks = chunk_text("", chunk_size=200, chunk_overlap=50)
-            assert chunks == [] or len(chunks) == 0
-        except ImportError:
-            assert [] == []
+        from ingestion.chunker import chunk_text
+        chunks = chunk_text("", chunk_size=200, chunk_overlap=50)
+        assert chunks == []
+

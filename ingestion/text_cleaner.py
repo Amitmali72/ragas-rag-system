@@ -31,8 +31,8 @@ def clean_text(text: str) -> str:
     # Step 1: Normalize unicode (e.g., fancy quotes → standard quotes)
     text = unicodedata.normalize("NFKD", text)
 
-    # Step 2: Remove non-printable / control characters (keep \n and \t)
-    text = re.sub(r"[^\S\n\t]", " ", text)  # Normalize whitespace chars to spaces
+    # Step 2: Normalize horizontal whitespace (tabs, special spaces) to regular spaces, remove control chars
+    text = re.sub(r"[^\S\n]", " ", text)
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
 
     # Step 3: Collapse multiple blank lines into a single paragraph break
